@@ -1,0 +1,80 @@
+name: Clean W&B notebook
+
+on:
+  push:
+    branches:
+      - fix-wandb-clean
+
+permissions:
+  contents: write
+
+jobs:
+  clean-notebook:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Apply surgical notebook fixes
+        run: |
+          python - <<'PY'
+          import ast, json
+          path = 'Formative1Part2_Classification.ipynb'
+          with open(path, encoding='utf-8') as f:
+              nb = json.load(f)
+
+          removed_evaluator = False
+          for cell in nb['cells']:
+              if cell.get('cell_type') != 'code':
+                  continue
+              src = ''.join(cell.get('source', []))
+
+              if 'wandb.login(key=WANDB_API_KEY, relogin=True)' in src:
+                  src = src.replace(
+                      'wandb.login(key=WANDB_API_KEY, relogin=True)',
+                      'os.environ["WANDB_API_KEY"] = WANDB_API_KEY\n    wandb.login(relogin=True, quiet=True)'
+                  )
+                  cell['source'] = src.splitlines(True)
+
+              if not removed_evaluator and 'def evaluate_model' in src:
+                  tree = ast.parse(src)
+                  lines = src.splitlines(True)
+                  for node in tree.body:
+                      if isinstance(node, ast.FunctionDef) and node.name == 'evaluate_model':
+                          a, b = node.lineno - 1, node.end_lineno
+                          cell['source'] = lines[:a] + lines[b:]
+                          removed_evaluator = True
+                          break
+
+          if not removed_evaluator:
+              raise RuntimeError('Expected duplicate evaluate_model definition was not found.')
+
+          with open(path, 'w', encoding='utf-8') as f:
+              json.dump(nb, f, indent=1, ensure_ascii=False)
+              f.write('\n')
+          PY
+      - name: Validate notebook syntax
+        run: |
+          python - <<'PY'
+          import ast, json
+          with open('Formative1Part2_Classification.ipynb', encoding='utf-8') as f:
+              nb = json.load(f)
+          code_cells = 0
+          for cell in nb['cells']:
+              if cell.get('cell_type') == 'code':
+                  code_cells += 1
+                  ast.parse(''.join(cell.get('source', [])))
+          assert code_cells > 0
+          print(f'Validated {code_cells} code cells.')
+          PY
+      - name: Commit surgical fixes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Formative1Part2_Classification.ipynb
+          git diff --cached --check
+          git commit -m 'Fix W&B authentication and remove duplicate evaluator'
+          git push
